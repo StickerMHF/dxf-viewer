@@ -1,5 +1,6 @@
 import {DxfFetcher} from "./DxfFetcher"
 import {DxfScene} from "./DxfScene"
+import {DxfGeojson} from "./DxfGeojson"
 import opentype from "opentype.js"
 
 const MSG_SIGNATURE = "DxfWorkerMsg"
@@ -155,9 +156,18 @@ export class DxfWorker {
         if (progressCbk) {
             progressCbk("prepare", 0, null)
         }
-        const dxfScene = new DxfScene(options)
-        await dxfScene.Build(dxf, fontFetchers)
-        return dxfScene.scene
+        if (options.MapType === "maplibre") {
+            const dxfGeojson = new DxfGeojson(options)
+            await dxfGeojson.Build(dxf, fontFetchers)
+            return dxfGeojson.scene
+        }else{
+            const dxfScene = new DxfScene(options)
+            await dxfScene.Build(dxf, fontFetchers)
+            return dxfScene.scene
+        }
+       
+       
+       
     }
 
     _CreateFontFetchers(urls, progressCbk) {

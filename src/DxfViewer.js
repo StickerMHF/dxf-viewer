@@ -1,10 +1,12 @@
 import * as three from "three"
-import {BatchingKey} from "./BatchingKey"
-import {DxfWorker} from "./DxfWorker"
-import {MaterialKey} from "./MaterialKey"
-import {ColorCode, DxfScene} from "./DxfScene"
-import {OrbitControls} from "./OrbitControls"
-import {RBTree} from "./RBTree"
+import maplibregl from 'maplibre-gl';
+import { BatchingKey } from "./BatchingKey"
+import { DxfWorker } from "./DxfWorker"
+import { MaterialKey } from "./MaterialKey"
+import {  DxfScene } from "./DxfScene"
+import {ColorCode} from "./Constant";
+import { OrbitControls } from "./OrbitControls"
+import { RBTree } from "./RBTree"
 
 /** Level in "message" events. */
 const MessageLevel = Object.freeze({
@@ -31,6 +33,7 @@ export class DxfViewer {
         this.clearColor = this.options.clearColor.getHex()
 
         this.scene = new three.Scene()
+
 
         try {
             this.renderer = new three.WebGLRenderer({
@@ -79,7 +82,17 @@ export class DxfViewer {
             this.resizeObserver = new ResizeObserver(entries => this._OnResize(entries[0]))
             this.resizeObserver.observe(domContainer)
         }
-        domContainer.appendChild(this.canvas)
+
+        if (options.MapType === "maplibre") {
+            this.maplibre = new maplibregl.Map({
+                container: 'map',
+                style: '', // stylesheet location
+                center: [0, 0], // starting position [lng, lat]
+                zoom: 9 // starting zoom
+            });
+        } else {
+            domContainer.appendChild(this.canvas)
+        }
 
         this.canvas.addEventListener("pointerdown", this._OnPointerEvent.bind(this))
         this.canvas.addEventListener("pointerup", this._OnPointerEvent.bind(this))
@@ -108,7 +121,7 @@ export class DxfViewer {
     /**
      * @returns {three.WebGLRenderer | null} Returns the created WebGL canvas.
      */
-    GetRenderer(){
+    GetRenderer() {
         return this.renderer;
     }
 
@@ -139,7 +152,7 @@ export class DxfViewer {
         if (this.controls) {
             this.controls.update()
         }
-        this._Emit("resized", {width, height})
+        this._Emit("resized", { width, height })
         this._Emit("viewChanged")
         this.Render()
     }
@@ -158,7 +171,7 @@ export class DxfViewer {
      * @param workerFactory {?Function} Factory for worker creation. The worker script should
      *  invoke DxfViewer.SetupWorker() function.
      */
-    async Load({url, fonts = null, progressCbk = null, workerFactory = null}) {
+    async Load({ url, fonts = null, progressCbk = null, workerFactory = null }) {
         if (url === null || url === undefined) {
             throw new Error("`url` parameter is not specified")
         }
@@ -167,35 +180,85 @@ export class DxfViewer {
 
         this.Clear()
 
-        this.worker = new DxfWorker(workerFactory ? workerFactory() : null)
-        const scene = await this.worker.Load(url, fonts, this.options, progressCbk)
-        await this.worker.Destroy()
-        this.worker = null
+        if (this.options.MapType === "maplibre") {
+            this.worker = new DxfWorker(workerFactory ? workerFactory() : null)
+            const scene = await this.worker.Load(url, fonts, this.options, progressCbk)
+            await this.worker.Destroy()
+            this.worker = null
+            
+            var bbox = [scene.mercatorTolonlat([scene.bounds.minX,scene.bounds.minY]), scene.mercatorTolonlat([scene.bounds.maxX,scene.bounds.maxY])];
+            this.maplibre.fitBounds(bbox, {
+                padding: {top: 10, bottom:25, left: 15, right: 5}
+                });
+            this.maplibre.addSource('dxf', {
+                'type': 'geojson',
+                'data': scene.geojson
+            });
+            this.maplibre.addLayer({
+                'id': 'park-boundary',
+                'type': 'fill',
+                'source': 'dxf',
+                'paint': {
+                    'fill-color': '#888888',
+                    'fill-opacity': 0.4
+                },
+                'filter': ['==', '$type', 'Polygon']
+            });
 
-        this.origin = scene.origin
-        this.bounds = scene.bounds
-        this.hasMissingChars = scene.hasMissingChars
-
-        for (const layer of scene.layers) {
-            this.layers.set(layer.name, new Layer(layer.name, layer.color))
-        }
-
-        /* Load all blocks on the first pass. */
-        for (const batch of scene.batches) {
-            if (batch.key.blockName !== null &&
-                batch.key.geometryType !== BatchingKey.GeometryType.BLOCK_INSTANCE &&
-                batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE) {
-
-                let block = this.blocks.get(batch.key.blockName)
-                if (!block) {
-                    block = new Block()
-                    this.blocks.set(batch.key.blockName, block)
+            this.maplibre.addLayer({
+                'id': 'park-volcanoes',
+                'type': 'circle',
+                'source': 'dxf',
+                'paint': {
+                    'circle-radius': 6,
+                    'circle-color': '#B42222'
+                },
+                'filter': ['==', '$type', 'Point']
+            });
+            this.maplibre.addLayer({
+                'id': 'route',
+                'type': 'line',
+                'source': 'dxf',
+                'filter': ['==', '$type', 'LineString'],
+                'layout': {
+                    'line-join': 'round',
+                    'line-cap': 'round'
+                },
+                'paint': {
+                    'line-color': '#888',
+                    'line-width': 1
                 }
-                block.PushBatch(new Batch(this, scene, batch))
-            }
-        }
+            });
+        } else {
+            this.worker = new DxfWorker(workerFactory ? workerFactory() : null)
+            const scene = await this.worker.Load(url, fonts, this.options, progressCbk)
+            await this.worker.Destroy()
+            this.worker = null
 
-        console.log(`DXF scene:
+            this.origin = scene.origin
+            this.bounds = scene.bounds
+            this.hasMissingChars = scene.hasMissingChars
+
+            for (const layer of scene.layers) {
+                this.layers.set(layer.name, new Layer(layer.name, layer.color))
+            }
+
+            /* Load all blocks on the first pass. */
+            for (const batch of scene.batches) {
+                if (batch.key.blockName !== null &&
+                    batch.key.geometryType !== BatchingKey.GeometryType.BLOCK_INSTANCE &&
+                    batch.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE) {
+
+                    let block = this.blocks.get(batch.key.blockName)
+                    if (!block) {
+                        block = new Block()
+                        this.blocks.set(batch.key.blockName, block)
+                    }
+                    block.PushBatch(new Batch(this, scene, batch))
+                }
+            }
+
+            console.log(`DXF scene:
                      ${scene.batches.length} batches,
                      ${this.layers.size} layers,
                      ${this.blocks.size} blocks,
@@ -203,27 +266,30 @@ export class DxfViewer {
                      indices ${scene.indices.byteLength} B
                      transforms ${scene.transforms.byteLength} B`)
 
-        /* Instantiate all entities. */
-        for (const batch of scene.batches) {
-            this._LoadBatch(scene, batch)
+            /* Instantiate all entities. */
+            for (const batch of scene.batches) {
+                this._LoadBatch(scene, batch)
+            }
+
+            this._Emit("loaded")
+
+            if (scene.bounds) {
+                this.FitView(scene.bounds.minX - scene.origin.x, scene.bounds.maxX - scene.origin.x,
+                    scene.bounds.minY - scene.origin.y, scene.bounds.maxY - scene.origin.y)
+            } else {
+                this._Message("Empty document", MessageLevel.WARN)
+            }
+
+            if (this.hasMissingChars) {
+                this._Message("Some characters cannot be properly displayed due to missing fonts",
+                    MessageLevel.WARN)
+            }
+
+            this._CreateControls()
+            this.Render()
         }
 
-        this._Emit("loaded")
 
-        if (scene.bounds) {
-            this.FitView(scene.bounds.minX - scene.origin.x, scene.bounds.maxX - scene.origin.x,
-                         scene.bounds.minY - scene.origin.y, scene.bounds.maxY - scene.origin.y)
-        } else {
-            this._Message("Empty document", MessageLevel.WARN)
-        }
-
-        if (this.hasMissingChars) {
-            this._Message("Some characters cannot be properly displayed due to missing fonts",
-                          MessageLevel.WARN)
-        }
-
-        this._CreateControls()
-        this.Render()
     }
 
     Render() {
@@ -235,7 +301,7 @@ export class DxfViewer {
     GetLayers() {
         const result = []
         for (const lyr of this.layers.values()) {
-            result.push({name: lyr.name, color: this._TransformColor(lyr.color)})
+            result.push({ name: lyr.name, color: this._TransformColor(lyr.color) })
         }
         return result
     }
@@ -271,7 +337,7 @@ export class DxfViewer {
         this.blocks.clear()
         this.materials.each(e => e.material.dispose())
         this.materials.clear()
-        this.SetView({x: 0, y: 0}, 2)
+        this.SetView({ x: 0, y: 0 }, 2)
         this._Emit("cleared")
         this.Render()
     }
@@ -319,7 +385,7 @@ export class DxfViewer {
         const aspect = this.canvasWidth / this.canvasHeight
         let width = maxX - minX
         const height = maxY - minY
-        const center = {x: minX + width / 2, y: minY + height / 2}
+        const center = { x: minX + width / 2, y: minY + height / 2 }
         if (height * aspect > width) {
             width = height * aspect
         }
@@ -380,7 +446,7 @@ export class DxfViewer {
     _EnsureRenderer() {
         if (!this.HasRenderer()) {
             throw new Error("WebGL renderer not available. " +
-                            "Probable WebGL context loss, try refreshing the page.")
+                "Probable WebGL context loss, try refreshing the page.")
         }
     }
 
@@ -410,12 +476,12 @@ export class DxfViewer {
     }
 
     _Message(message, level = MessageLevel.INFO) {
-        this._Emit("message", {message, level})
+        this._Emit("message", { message, level })
     }
 
     _OnPointerEvent(e) {
         const canvasRect = e.target.getBoundingClientRect()
-        const canvasCoord = {x: e.clientX - canvasRect.left, y: e.clientY - canvasRect.top}
+        const canvasCoord = { x: e.clientX - canvasRect.left, y: e.clientY - canvasRect.top }
         this._Emit(e.type, {
             domEvent: e,
             canvasCoord,
@@ -426,9 +492,9 @@ export class DxfViewer {
     /** @return {{x,y}} Scene coordinate corresponding to the specified canvas pixel coordinates. */
     _CanvasToSceneCoord(x, y) {
         const v = new three.Vector3(x * 2 / this.canvasWidth - 1,
-                                    -y * 2 / this.canvasHeight + 1,
-                                    1).unproject(this.camera)
-        return {x: v.x, y: v.y}
+            -y * 2 / this.canvasHeight + 1,
+            1).unproject(this.camera)
+        return { x: v.x, y: v.y }
     }
 
     _OnResize(entry) {
@@ -456,7 +522,7 @@ export class DxfViewer {
 
     _GetSimpleColorMaterial(color, instanceType = InstanceType.NONE) {
         const key = new MaterialKey(instanceType, null, color, 0)
-        let entry = this.materials.find({key})
+        let entry = this.materials.find({ key })
         if (entry !== null) {
             return entry.material
         }
@@ -498,14 +564,14 @@ export class DxfViewer {
 
     _GetSimplePointMaterial(color, instanceType = InstanceType.NONE) {
         const key = new MaterialKey(instanceType, BatchingKey.GeometryType.POINTS, color, 0)
-        let entry = this.materials.find({key})
+        let entry = this.materials.find({ key })
         if (entry !== null) {
             return entry.material
         }
         entry = {
             key,
             material: this._CreateSimplePointMaterialInstance(color, this.options.pointSize,
-                                                              instanceType)
+                instanceType)
         }
         this.materials.insert(entry)
         return entry.material
@@ -707,8 +773,8 @@ class Batch {
         if (batch.hasOwnProperty("verticesOffset")) {
             const verticesArray =
                 new Float32Array(scene.vertices,
-                                 batch.verticesOffset * Float32Array.BYTES_PER_ELEMENT,
-                                 batch.verticesSize)
+                    batch.verticesOffset * Float32Array.BYTES_PER_ELEMENT,
+                    batch.verticesSize)
             if (this.key.geometryType !== BatchingKey.GeometryType.POINT_INSTANCE ||
                 scene.pointShapeHasDot) {
                 this.vertices = new three.BufferAttribute(verticesArray, 2)
@@ -724,12 +790,12 @@ class Batch {
 
                 const verticesArray =
                     new Float32Array(scene.vertices,
-                                     rawChunk.verticesOffset * Float32Array.BYTES_PER_ELEMENT,
-                                     rawChunk.verticesSize)
+                        rawChunk.verticesOffset * Float32Array.BYTES_PER_ELEMENT,
+                        rawChunk.verticesSize)
                 const indicesArray =
                     new Uint16Array(scene.indices,
-                                    rawChunk.indicesOffset * Uint16Array.BYTES_PER_ELEMENT,
-                                    rawChunk.indicesSize)
+                        rawChunk.indicesOffset * Uint16Array.BYTES_PER_ELEMENT,
+                        rawChunk.indicesSize)
                 this.chunks.push({
                     vertices: new three.BufferAttribute(verticesArray, 2),
                     indices: new three.BufferAttribute(indicesArray, 1)
@@ -740,8 +806,8 @@ class Batch {
         if (batch.hasOwnProperty("transformsOffset")) {
             const transformsArray =
                 new Float32Array(scene.transforms,
-                                 batch.transformsOffset * Float32Array.BYTES_PER_ELEMENT,
-                                 batch.transformsSize)
+                    batch.transformsOffset * Float32Array.BYTES_PER_ELEMENT,
+                    batch.transformsSize)
             /* Each transform is 3x2 matrix which is split into two 3D vectors which will occupy two
              * attribute slots.
              */
@@ -764,12 +830,12 @@ class Batch {
 
     GetInstanceType() {
         switch (this.key.geometryType) {
-        case BatchingKey.GeometryType.BLOCK_INSTANCE:
-            return InstanceType.FULL
-        case BatchingKey.GeometryType.POINT_INSTANCE:
-            return InstanceType.POINT
-        default:
-            return InstanceType.NONE
+            case BatchingKey.GeometryType.BLOCK_INSTANCE:
+                return InstanceType.FULL
+            case BatchingKey.GeometryType.POINT_INSTANCE:
+                return InstanceType.POINT
+            default:
+                return InstanceType.NONE
         }
     }
 
@@ -796,29 +862,29 @@ class Batch {
         //XXX line type
         const materialFactory =
             this.key.geometryType === BatchingKey.GeometryType.POINTS ||
-            this.key.geometryType === BatchingKey.GeometryType.POINT_INSTANCE ?
+                this.key.geometryType === BatchingKey.GeometryType.POINT_INSTANCE ?
                 this.viewer._GetSimplePointMaterial : this.viewer._GetSimpleColorMaterial
 
         const material = materialFactory.call(this.viewer, this.viewer._TransformColor(color),
-                                              instanceBatch?.GetInstanceType() ?? InstanceType.NONE)
+            instanceBatch?.GetInstanceType() ?? InstanceType.NONE)
 
         let objConstructor
         switch (this.key.geometryType) {
-        case BatchingKey.GeometryType.POINTS:
-        /* This method also called for creating dots for shaped point instances. */
-        case BatchingKey.GeometryType.POINT_INSTANCE:
-            objConstructor = three.Points
-            break
-        case BatchingKey.GeometryType.LINES:
-        case BatchingKey.GeometryType.INDEXED_LINES:
-            objConstructor = three.LineSegments
-            break
-        case BatchingKey.GeometryType.TRIANGLES:
-        case BatchingKey.GeometryType.INDEXED_TRIANGLES:
-            objConstructor = three.Mesh
-            break
-        default:
-            throw new Error("Unexpected geometry type:" + this.key.geometryType)
+            case BatchingKey.GeometryType.POINTS:
+            /* This method also called for creating dots for shaped point instances. */
+            case BatchingKey.GeometryType.POINT_INSTANCE:
+                objConstructor = three.Points
+                break
+            case BatchingKey.GeometryType.LINES:
+            case BatchingKey.GeometryType.INDEXED_LINES:
+                objConstructor = three.LineSegments
+                break
+            case BatchingKey.GeometryType.TRIANGLES:
+            case BatchingKey.GeometryType.INDEXED_TRIANGLES:
+                objConstructor = three.Mesh
+                break
+            default:
+                throw new Error("Unexpected geometry type:" + this.key.geometryType)
         }
 
         function CreateObject(vertices, indices) {
@@ -956,7 +1022,7 @@ function ContrastRatio(c1, c2) {
     return (Luminance(c1) + 0.05) / (Luminance(c2) + 0.05)
 }
 
-function HlsToRgb({h, l, s}) {
+function HlsToRgb({ h, l, s }) {
     let r, g, b
     if (s === 0) {
         /* Achromatic */
@@ -969,28 +1035,28 @@ function HlsToRgb({h, l, s}) {
             if (t > 1) {
                 t -= 1
             }
-            if (t < 1/6) {
+            if (t < 1 / 6) {
                 return p + (q - p) * 6 * t
             }
-            if (t < 1/2) {
+            if (t < 1 / 2) {
                 return q
             }
-            if (t < 2/3) {
-                return p + (q - p) * (2/3 - t) * 6
+            if (t < 2 / 3) {
+                return p + (q - p) * (2 / 3 - t) * 6
             }
             return p
         }
 
         const q = l < 0.5 ? l * (1 + s) : l + s - l * s
         const p = 2 * l - q
-        r = hue2rgb(p, q, h + 1/3)
+        r = hue2rgb(p, q, h + 1 / 3)
         g = hue2rgb(p, q, h)
-        b = hue2rgb(p, q, h - 1/3)
+        b = hue2rgb(p, q, h - 1 / 3)
     }
 
     return (Math.min(Math.floor(SRgbColor(r) * 256), 255) << 16) |
-           (Math.min(Math.floor(SRgbColor(g) * 256), 255) << 8) |
-            Math.min(Math.floor(SRgbColor(b) * 256), 255)
+        (Math.min(Math.floor(SRgbColor(g) * 256), 255) << 8) |
+        Math.min(Math.floor(SRgbColor(b) * 256), 255)
 }
 
 function RgbToHls(color) {
@@ -1010,20 +1076,20 @@ function RgbToHls(color) {
         const d = max - min
         s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
         switch (max) {
-        case r:
-            h = (g - b) / d + (g < b ? 6 : 0)
-            break;
-        case g:
-            h = (b - r) / d + 2
-            break
-        case b:
-            h = (r - g) / d + 4
-            break
+            case r:
+                h = (g - b) / d + (g < b ? 6 : 0)
+                break;
+            case g:
+                h = (b - r) / d + 2
+                break
+            case b:
+                h = (r - g) / d + 4
+                break
         }
         h /= 6
     }
 
-    return {h, l, s}
+    return { h, l, s }
 }
 
 function Lighten(color, factor) {

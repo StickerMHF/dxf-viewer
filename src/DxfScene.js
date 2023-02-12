@@ -1,21 +1,18 @@
-import {DynamicBuffer, NativeType} from "./DynamicBuffer"
+
 import {BatchingKey} from "./BatchingKey"
 import {Matrix3, Vector2} from "three"
-import {TextRenderer} from "./TextRenderer"
+import {TextRenderer} from "./three/TextRenderer"
 import {RBTree} from "./RBTree"
 import {MTextFormatParser} from "./MTextFormatParser";
+import {RenderBatch} from "./three/RenderBatch.js";
+import {Block} from "./three/Block.js";
+import {BlockContext} from "./three/BlockContext.js";
 
-/** Use 16-bit indices for indexed geometry. */
-const INDEXED_CHUNK_SIZE = 0x10000
-/** Arc angle for tessellating point circle shape. */
-const POINT_CIRCLE_TESSELLATION_ANGLE = 15 * Math.PI / 180
-const POINT_SHAPE_BLOCK_NAME = "__point_shape"
-/** Flatten a block if its total vertices count in all instances is less than this value. */
-const BLOCK_FLATTENING_VERTICES_THRESHOLD = 1024
-/** Number of subdivisions per spline point. */
-const SPLINE_SUBDIVISION = 4
-/** Regex for parsing special characters in text entities. */
-const SPECIAL_CHARS_RE = /(?:%%([dpc]))|(?:\\U\+([0-9a-fA-F]{4}))/g
+import {Entity} from "./three/Entity.js";
+import {PdMode,ColorCode,POINT_CIRCLE_TESSELLATION_ANGLE,POINT_SHAPE_BLOCK_NAME,SPLINE_SUBDIVISION,SPECIAL_CHARS_RE} from "./Constant";
+
+
+
 
 /** This class prepares an internal representation of a DXF file, optimized fo WebGL rendering. It
  * is decoupled in such a way so that it should be possible to build it in a web-worker, effectively
@@ -163,44 +160,44 @@ export class DxfScene {
     _ProcessDxfEntity(entity, blockCtx = null) {
         let renderEntities
         switch (entity.type) {
-        case "LINE":
-            renderEntities = this._DecomposeLine(entity, blockCtx)
-            break
+        // case "LINE":
+        //     renderEntities = this._DecomposeLine(entity, blockCtx)
+        //     break
         case "POLYLINE":
         case "LWPOLYLINE":
             renderEntities = this._DecomposePolyline(entity, blockCtx)
             break
-        case "ARC":
-            renderEntities = this._DecomposeArc(entity, blockCtx)
-            break
-        case "CIRCLE":
-            renderEntities = this._DecomposeCircle(entity, blockCtx)
-            break
-        case "ELLIPSE":
-            renderEntities = this._DecomposeEllipse(entity, blockCtx)
-            break
-        case "POINT":
-            renderEntities = this._DecomposePoint(entity, blockCtx)
-            break
-        case "SPLINE":
-            renderEntities = this._DecomposeSpline(entity, blockCtx)
-            break
-        case "INSERT":
-            /* Works with rendering batches without intermediate entities. */
-            this._ProcessInsert(entity, blockCtx)
-            return
-        case "TEXT":
-            renderEntities = this._DecomposeText(entity, blockCtx)
-            break
-        case "MTEXT":
-            renderEntities = this._DecomposeMText(entity, blockCtx)
-            break
-        case "3DFACE":
-            renderEntities = this._Decompose3DFace(entity, blockCtx)
-            break
-        case "SOLID":
-            renderEntities = this._DecomposeSolid(entity, blockCtx)
-            break
+        // case "ARC":
+        //     renderEntities = this._DecomposeArc(entity, blockCtx)
+        //     break
+        // case "CIRCLE":
+        //     renderEntities = this._DecomposeCircle(entity, blockCtx)
+        //     break
+        // case "ELLIPSE":
+        //     renderEntities = this._DecomposeEllipse(entity, blockCtx)
+        //     break
+        // case "POINT":
+        //     renderEntities = this._DecomposePoint(entity, blockCtx)
+        //     break
+        // case "SPLINE":
+        //     renderEntities = this._DecomposeSpline(entity, blockCtx)
+        //     break
+        // case "INSERT":
+        //     /* Works with rendering batches without intermediate entities. */
+        //     this._ProcessInsert(entity, blockCtx)
+        //     return
+        // case "TEXT":
+        //     renderEntities = this._DecomposeText(entity, blockCtx)
+        //     break
+        // case "MTEXT":
+        //     renderEntities = this._DecomposeMText(entity, blockCtx)
+        //     break
+        // case "3DFACE":
+        //     renderEntities = this._Decompose3DFace(entity, blockCtx)
+        //     break
+        // case "SOLID":
+        //     renderEntities = this._DecomposeSolid(entity, blockCtx)
+        //     break
         default:
             console.log("Unhandled entity type: " + entity.type)
             return
@@ -1355,566 +1352,6 @@ export class DxfScene {
         return scene
     }
 }
-
-class RenderBatch {
-    constructor(key) {
-        this.key = key
-        if (key.IsIndexed()) {
-            this.chunks = []
-        } else if (key.geometryType === BatchingKey.GeometryType.BLOCK_INSTANCE) {
-            this.transforms = new DynamicBuffer(NativeType.FLOAT32)
-        } else {
-            this.vertices = new DynamicBuffer(NativeType.FLOAT32)
-        }
-    }
-
-    PushVertex(v) {
-        const idx = this.vertices.Push(v.x)
-        this.vertices.Push(v.y)
-        return idx
-    }
-
-    /**
-     * @param matrix {Matrix3} 3x3 Transform matrix. Assuming 2D affine transform so only top 3x2
-     *  sub-matrix is taken.
-     */
-    PushInstanceTransform(matrix) {
-        /* Storing in row-major order as expected by renderer. */
-        for (let row = 0; row < 2; row++) {
-            for (let col = 0; col < 3; col++) {
-                this.transforms.Push(matrix.elements[col * 3 + row])
-            }
-        }
-    }
-
-    /** This method actually reserves space for the specified number of indexed vertices in some
-     * chunk. The returned object should be used to push exactly the same amount vertices and any
-     * number of their referring indices.
-     * @param verticesCount Number of vertices in the chunk.
-     * @return {IndexedChunkWriter}
-     */
-    PushChunk(verticesCount) {
-        if (verticesCount > INDEXED_CHUNK_SIZE) {
-            throw new Error("Vertices count exceeds chunk limit: " + verticesCount)
-        }
-        /* Find suitable chunk with minimal remaining space to fill them as fully as possible. */
-        let curChunk = null
-        let curSpace = 0
-        for (const chunk of this.chunks) {
-            const space = INDEXED_CHUNK_SIZE - chunk.vertices.GetSize() / 2
-            if (space < verticesCount) {
-                continue
-            }
-            if (curChunk === null || space < curSpace) {
-                curChunk = chunk
-                curSpace = space
-            }
-        }
-        if (curChunk === null) {
-            curChunk = this._NewChunk(verticesCount)
-        }
-        return new IndexedChunkWriter(curChunk, verticesCount)
-    }
-
-    /** Merge other batch into this one. They should have the same geometry type. Instanced batches
-     * are disallowed.
-     *
-     * @param batch {RenderBatch}
-     * @param transform {?Matrix3} Optional transform to apply for merged vertices.
-     */
-    Merge(batch, transform = null) {
-        if (this.key.geometryType !== batch.key.geometryType) {
-            throw new Error("Rendering batch merging geometry type mismatch: " +
-                            `${this.key.geometryType} !== ${batch.key.geometryType}`)
-        }
-        if (this.key.IsInstanced()) {
-            throw new Error("Attempted to merge instanced batch")
-        }
-        if (this.key.IsIndexed()) {
-            /* Merge chunks. */
-            for (const chunk of batch.chunks) {
-                const verticesSize = chunk.vertices.size
-                const chunkWriter = this.PushChunk(verticesSize / 2)
-                for (let i = 0; i < verticesSize; i += 2) {
-                    const v = new Vector2(chunk.vertices.Get(i), chunk.vertices.Get(i + 1))
-                    if (transform) {
-                        v.applyMatrix3(transform)
-                    }
-                    chunkWriter.PushVertex(v)
-                }
-                const numIndices = chunk.indices.size
-                for (let i = 0; i < numIndices; i ++) {
-                    chunkWriter.PushIndex(chunk.indices.Get(i))
-                }
-                chunkWriter.Finish()
-            }
-        } else {
-            const n = batch.vertices.size
-            for (let i = 0; i < n; i += 2) {
-                const v = new Vector2(batch.vertices.Get(i), batch.vertices.Get(i + 1))
-                if (transform) {
-                    v.applyMatrix3(transform)
-                }
-                this.PushVertex(v)
-            }
-        }
-    }
-
-    /** @return Vertices buffer required size in bytes. */
-    GetVerticesBufferSize() {
-        if (this.key.IsIndexed()) {
-            let size = 0
-            for (const chunk of this.chunks) {
-                size += chunk.vertices.GetSize()
-            }
-            return size * Float32Array.BYTES_PER_ELEMENT
-        } else if (this.key.geometryType === BatchingKey.GeometryType.BLOCK_INSTANCE) {
-            return 0
-        } else {
-            return this.vertices.GetSize() * Float32Array.BYTES_PER_ELEMENT
-        }
-    }
-
-    /** @return Indices buffer required size in bytes. */
-    GetIndicesBufferSize() {
-        if (this.key.IsIndexed()) {
-            let size = 0
-            for (const chunk of this.chunks) {
-                size += chunk.indices.GetSize()
-            }
-            return size * Uint16Array.BYTES_PER_ELEMENT
-        } else {
-            return 0
-        }
-    }
-
-    /** @return Instances transforms buffer required size in bytes. */
-    GetTransformsSize() {
-        if (this.key.geometryType === BatchingKey.GeometryType.BLOCK_INSTANCE) {
-            return this.transforms.GetSize() * Float32Array.BYTES_PER_ELEMENT
-        } else {
-            return 0
-        }
-    }
-
-    Serialize(buffers) {
-        if (this.key.IsIndexed()) {
-            const batch = {
-                key: this.key,
-                chunks: []
-            }
-            for (const chunk of this.chunks) {
-                batch.chunks.push(chunk.Serialize(buffers))
-            }
-            return batch
-
-        } else if (this.key.geometryType === BatchingKey.GeometryType.BLOCK_INSTANCE) {
-            const size = this.transforms.GetSize()
-            const batch = {
-                key: this.key,
-                transformsOffset: buffers.transformsOffset,
-                transformsSize: size
-            }
-            this.transforms.CopyTo(buffers.transforms, buffers.transformsOffset)
-            buffers.transformsOffset += size
-            return batch
-
-        } else {
-            const size = this.vertices.GetSize()
-            const batch = {
-                key: this.key,
-                verticesOffset: buffers.verticesOffset,
-                verticesSize: size
-            }
-            this.vertices.CopyTo(buffers.vertices, buffers.verticesOffset)
-            buffers.verticesOffset += size
-            return batch
-        }
-    }
-
-    _NewChunk(initialCapacity) {
-        const chunk = new IndexedChunk(initialCapacity)
-        this.chunks.push(chunk)
-        return chunk
-    }
-}
-
-class Block {
-    /** @param data {{}} Raw DXF entity. */
-    constructor(data) {
-        this.data = data
-        /* Number of times referenced from top-level entities (INSERT). */
-        this.useCount = 0
-        /* Number of times referenced by other block. */
-        this.nestedUseCount = 0
-        /* Total number of vertices in this block. Used for flattening decision. */
-        this.verticesCount = 0
-        /* Offset {x, y} to apply for all vertices. Used to move origin near vertices location to
-         * minimize precision loss.
-         */
-        this.offset = null
-        /* Definition batches. Used for root blocks flattening. */
-        this.batches = []
-        this.flatten = false
-        /** Bounds in block coordinates (with offset applied). */
-        this.bounds = null
-    }
-
-    /** Set block flattening flag based on usage statistics.
-     * @return {Boolean} New flatten flag state.
-     */
-    SetFlatten() {
-        if (!this.HasGeometry()) {
-            return false
-        }
-        /* Flatten if a block is used once (pure optimization if shares its layer with other
-         * geometry) or if total instanced vertices number is less than a threshold (trade some
-         * space for draw calls number).
-         */
-        this.flatten = this.useCount === 1 ||
-                       this.useCount * this.verticesCount <= BLOCK_FLATTENING_VERTICES_THRESHOLD
-        return this.flatten
-    }
-
-    /** @return {Boolean} True if has something to draw. */
-    HasGeometry() {
-        /* Offset is set on first geometry vertex encountered. */
-        return this.offset !== null
-    }
-
-    RegisterInsert(entity) {
-        this.useCount++
-    }
-
-    RegisterNestedUse(usedByBlock) {
-        this.nestedUseCount++
-    }
-
-    /** @return {BlockContext} Context for block definition. */
-    DefinitionContext() {
-        return new BlockContext(this, BlockContext.Type.DEFINITION)
-    }
-
-    InstantiationContext() {
-        return new BlockContext(this, BlockContext.Type.INSTANTIATION)
-    }
-
-    UpdateBounds(v) {
-        if (this.bounds === null) {
-            this.bounds = { minX: v.x, maxX: v.x, minY: v.y, maxY: v.y }
-        } else {
-            if (v.x < this.bounds.minX) {
-                this.bounds.minX = v.x
-            } else if (v.x > this.bounds.maxX) {
-                this.bounds.maxX = v.x
-            }
-            if (v.y < this.bounds.minY) {
-                this.bounds.minY = v.y
-            } else if (v.y > this.bounds.maxY) {
-                this.bounds.maxY = v.y
-            }
-        }
-    }
-}
-
-class BlockContext {
-    constructor(block, type) {
-        this.block = block
-        this.type = type
-        this.origin = this.block.data.position
-        /* Transform to apply for block definition entities not including block offset. */
-        this.transform = new Matrix3()
-    }
-
-    /** @return {string} Block name */
-    get name() {
-        return this.block.data.name
-    }
-
-    /**
-     * @param v {{x,y}}
-     * @return {{x,y}}
-     */
-    TransformVertex(v) {
-        const result = new Vector2(v.x, v.y).applyMatrix3(this.transform)
-        if (this.type !== BlockContext.Type.DEFINITION &&
-            this.type !== BlockContext.Type.NESTED_DEFINITION) {
-
-            throw new Error("Unexpected transform type")
-        }
-        this.block.verticesCount++
-        if (this.block.offset === null) {
-            /* This is the first vertex. Take it as a block origin. So the result is always zero
-             * vector for the first vertex.
-             */
-            this.block.offset = result
-            const v = new Vector2()
-            this.block.UpdateBounds(v)
-            return v
-        }
-        result.sub(this.block.offset)
-        this.block.UpdateBounds(result)
-        return result
-    }
-
-    /**
-     * Get transform for block instance.
-     * @param entity Raw DXF INSERT entity.
-     * @return {Matrix3} Transform matrix for block instance to apply to the block definition.
-     */
-    GetInsertionTransform(entity) {
-        const mInsert = new Matrix3().translate(-this.origin.x, -this.origin.y)
-        const yScale = entity.yScale || 1
-        const xScale = entity.xScale || 1
-        const rotation = -(entity.rotation || 0) * Math.PI / 180
-        let x = entity.position.x
-        const y = entity.position.y
-        mInsert.scale(xScale, yScale)
-        mInsert.rotate(rotation)
-        mInsert.translate(x, y)
-        if (entity.extrusionDirection && entity.extrusionDirection.z < 0) {
-            mInsert.scale(-1, 1)
-        }
-        if (this.type !== BlockContext.Type.INSTANTIATION) {
-            return mInsert
-        }
-        const mOffset = new Matrix3().translate(this.block.offset.x, this.block.offset.y)
-        return mInsert.multiply(mOffset)
-    }
-
-    /**
-     * Create context for nested block.
-     * @param block {Block} Nested block.
-     * @param entity Raw DXF INSERT entity.
-     * @return {BlockContext} Context to use for nested block entities.
-     */
-    NestedBlockContext(block, entity) {
-        block.RegisterNestedUse(this.block)
-        const nestedCtx = new BlockContext(block, BlockContext.Type.NESTED_DEFINITION)
-        const nestedTransform = nestedCtx.GetInsertionTransform(entity)
-        const ctx = new BlockContext(this.block, BlockContext.Type.NESTED_DEFINITION)
-        ctx.transform = new Matrix3().multiplyMatrices(this.transform, nestedTransform)
-        return ctx
-    }
-}
-
-BlockContext.Type = Object.freeze({
-    DEFINITION: 0,
-    NESTED_DEFINITION: 1,
-    INSTANTIATION: 2
-})
-
-class IndexedChunk {
-    constructor(initialCapacity) {
-        if (initialCapacity < 16) {
-            initialCapacity = 16
-        }
-        /* Average two indices per vertex. */
-        this.indices = new DynamicBuffer(NativeType.UINT16, initialCapacity * 2)
-        /* Two components per vertex. */
-        this.vertices = new DynamicBuffer(NativeType.FLOAT32, initialCapacity * 2)
-    }
-
-    Serialize(buffers) {
-        const chunk = {}
-        {
-            const size = this.vertices.GetSize()
-            chunk.verticesOffset = buffers.verticesOffset
-            chunk.verticesSize = size
-            this.vertices.CopyTo(buffers.vertices, buffers.verticesOffset)
-            buffers.verticesOffset += size
-        }
-        {
-            const size = this.indices.GetSize()
-            chunk.indicesOffset = buffers.indicesOffset
-            chunk.indicesSize = size
-            this.indices.CopyTo(buffers.indices, buffers.indicesOffset)
-            buffers.indicesOffset += size
-        }
-        return chunk
-    }
-}
-
-class IndexedChunkWriter {
-    constructor(chunk, verticesCount) {
-        this.chunk = chunk
-        this.verticesCount = verticesCount
-        this.verticesOffset = this.chunk.vertices.GetSize() / 2
-        this.numVerticesPushed = 0
-    }
-
-    PushVertex(v) {
-        if (this.numVerticesPushed === this.verticesCount) {
-            throw new Error()
-        }
-        this.chunk.vertices.Push(v.x)
-        this.chunk.vertices.Push(v.y)
-        this.numVerticesPushed++
-    }
-
-    PushIndex(idx) {
-        if (idx < 0 || idx >= this.verticesCount) {
-            throw new Error(`Index out of range: ${idx}/${this.verticesCount}`)
-        }
-        this.chunk.indices.Push(idx + this.verticesOffset)
-    }
-
-    Finish() {
-        if (this.numVerticesPushed !== this.verticesCount) {
-            throw new Error(`Not all vertices pushed: ${this.numVerticesPushed}/${this.verticesCount}`)
-        }
-    }
-}
-
-/** Internal entity representation. DXF features are decomposed into these simpler entities. Whole
- * entity always shares single material.
- */
-export class Entity {
-    /** @param type {number} See Entity.Type
-     * @param vertices {{x, y}[]}
-     * @param indices {?number[]} Indices for indexed geometry.
-     * @param layer {?string}
-     * @param color {number}
-     * @param lineType {?number}
-     * @param shape {Boolean} true if closed shape.
-     */
-    constructor({type, vertices, indices = null, layer = null, color, lineType = 0, shape = false}) {
-        this.type = type
-        this.vertices = vertices
-        this.indices = indices
-        this.layer = layer
-        this.color = color
-        this.lineType = lineType
-        this.shape = shape
-    }
-
-    *_IterateVertices(startIndex, count) {
-        for (let idx = startIndex; idx < startIndex + count; idx++) {
-            yield this.vertices[idx]
-        }
-    }
-
-    /** Split line into chunks with at most INDEXED_CHUNK_SIZE vertices in each one. Each chunk is
-     * an object with the following properties:
-     *  * "verticesCount" - length of "vertices"
-     *  * "vertices" - iterator for included vertices.
-     *  * "indices" - iterator for indices.
-     *  Closed shapes are handled properly.
-     */
-    *_IterateLineChunks() {
-        const verticesCount = this.vertices.length
-        if (verticesCount < 2) {
-            return
-        }
-        const _this = this
-        /* chunkOffset == verticesCount for shape closing vertex. */
-        for (let chunkOffset = 0; chunkOffset <= verticesCount; chunkOffset += INDEXED_CHUNK_SIZE) {
-            let count = verticesCount - chunkOffset
-            let isLast
-            if (count > INDEXED_CHUNK_SIZE) {
-                count = INDEXED_CHUNK_SIZE
-                isLast = false
-            } else {
-                isLast = true
-            }
-            if (isLast && this.shape && chunkOffset > 0 && count === INDEXED_CHUNK_SIZE) {
-                /* Corner case - required shape closing vertex does not fit into the chunk. Will
-                * require additional chunk.
-                */
-                isLast = false
-            }
-            if (chunkOffset === verticesCount && !this.shape) {
-                /* Shape is not closed and it is last closing vertex iteration. */
-                break
-            }
-
-            let vertices, indices, chunkVerticesCount
-            if (count < 2) {
-                /* Either last vertex or last shape-closing vertex, or both. */
-                if (count === 1 && this.shape) {
-                    /* Both. */
-                    vertices = (function*() {
-                        yield this.vertices[chunkOffset]
-                        yield this.vertices[0]
-                    })()
-                } else if (count === 1) {
-                    /* Just last vertex. Take previous one to make a line. */
-                    vertices = (function*() {
-                        yield this.vertices[chunkOffset - 1]
-                        yield this.vertices[chunkOffset]
-                    })()
-                } else {
-                    /* Just shape-closing vertex. Take last one to make a line. */
-                    vertices = (function*() {
-                        yield this.vertices[verticesCount - 1]
-                        yield this.vertices[0]
-                    })()
-                }
-                indices = _IterateLineIndices(2, false)
-                chunkVerticesCount = 2
-            } else if (isLast && this.shape && chunkOffset > 0 && count < INDEXED_CHUNK_SIZE) {
-                /* Additional vertex to close the shape. */
-                vertices = (function*() {
-                    yield* _this._IterateVertices(chunkOffset, count)
-                    yield this.vertices[0]
-                })()
-                indices = _IterateLineIndices(count + 1, false)
-                chunkVerticesCount = count + 1
-            } else {
-                vertices = this._IterateVertices(chunkOffset, count)
-                indices = _IterateLineIndices(count,
-                                              isLast && chunkOffset === 0 && this.shape)
-                chunkVerticesCount = count
-            }
-            yield {
-                verticesCount: chunkVerticesCount,
-                vertices,
-                indices
-            }
-        }
-    }
-}
-
-Entity.Type = Object.freeze({
-    POINTS: 0,
-    /** Each vertices pair defines a segment. */
-    LINE_SEGMENTS: 1,
-    POLYLINE: 2,
-    TRIANGLES: 3
-})
-
-function* _IterateLineIndices(verticesCount, close) {
-    for (let idx = 0; idx < verticesCount - 1; idx++) {
-        yield idx
-        yield idx + 1
-    }
-    if (close && verticesCount > 2) {
-        yield verticesCount - 1
-        yield 0
-    }
-}
-
-/** Point display mode, $PDMODE system variable. */
-const PdMode = Object.freeze({
-    DOT: 0,
-    NONE: 1,
-    PLUS: 2,
-    CROSS: 3,
-    TICK: 4,
-    MARK_MASK: 0xf,
-
-    CIRCLE: 0x20,
-    SQUARE: 0x40,
-
-    SHAPE_MASK: 0xf0
-})
-
-/** Special color values, used for block entities. Regular entities color is resolved instantly. */
-export const ColorCode = Object.freeze({
-    BY_LAYER: -1,
-    BY_BLOCK: -2
-})
-
 DxfScene.DefaultOptions = {
     /** Target angle for each segment of tessellated arc. */
     arcTessellationAngle: 10 / 180 * Math.PI,

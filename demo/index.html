@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>StickerMap | Test</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <meta http-equiv="Access-Control-Allow-Origin" content="*">
+    <!-- <link rel="stylesheet" href="../../static/stickermap25d.css"> -->
+    <link href='https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css' rel='stylesheet' />
+    <script>
+
+    </script>
+    <script src="/static/dxfView.js"></script>
+    <!-- <script src="https://code.jquery.com/jquery-3.3.1.min.js"></script> -->
+
+    <style>
+        html,body{
+            width: 100%;
+            height: 100%;
+        }
+        body {
+            background-color: #000;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+        }
+
+        /*地图窗口样式定义*/
+        .mapView {
+            /* display: block;
+            position: absolute;
+            top: 0;
+            left: 0; */
+            border: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        /*页面功能按钮*/
+        .btnApp {
+            cursor: pointer;
+            position: absolute;
+            bottom: 24px;
+            font-size: 14px;
+            width: 120px;
+            height: 32px;
+        }
+
+        .msgLabel {
+            position: absolute;
+            top: 24px;
+            left: 100px;
+            z-index: 101;
+            background-color: #000;
+            color: aliceblue;
+        }
+
+        .menu_btns {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+        }
+    </style>
+
+</head>
+
+<body onload="startup()">
+    <div id="map" class="mapView"></div>
+    <!-- <button onclick="start1()" class="btnApp" style="left: 14px;">开始</button> -->
+    <div class="menu_btns">
+        <input id="select-file" type="file" onchange="loadedFile()">
+    </div>
+    <script type="text/javascript">
+        //设置全局对象
+        var map3d, push, pushTiles, inputFile, dxfUrl, isLocalFile, dxfViewer;
+        //初始化地图
+        function startup() {
+            let mapDom = document.getElementById("map");
+            dxfViewer = new StickerMapCAD.DxfViewer(mapDom, {
+                autoResize: true,
+                colorCorrection: true,
+                MapType:"maplibre"
+            })
+        }
+        async function loadedFile() {
+            dxfViewer.Clear()
+            let input = document.getElementById("select-file");
+            if (dxfUrl) {
+                inputFile = null
+                URL.revokeObjectURL(dxfUrl)
+                dxfUrl = null
+                return
+            }
+            if (dxfUrl && isLocalFile) {
+                URL.revokeObjectURL(dxfUrl)
+            }
+            isLocalFile = true
+            inputFile = input.files[0]
+            dxfUrl = URL.createObjectURL(inputFile);
+            await dxfViewer.Load({
+                url:dxfUrl,
+                fonts: ["/demo/fonts/HanaMinA.ttf","/demo/fonts/NanumGothic-Regular.ttf","/demo/fonts/NotoSansDisplay-SemiCondensedLightItalic.ttf","/demo/fonts/Roboto-LightItalic.ttf"],
+                // progressCbk: this._OnProgress.bind(this),
+                // workerFactory: DxfViewerWorker
+            })
+        }
+
+
+
+
+    </script>
+</body>
+
+</html>
